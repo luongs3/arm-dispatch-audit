@@ -1,3 +1,4 @@
-isa-probe*
-!src/
+# Build outputs only — must NOT match src/isa-probe.c
+/isa-probe-portable
+/isa-probe-sve
 *.o
