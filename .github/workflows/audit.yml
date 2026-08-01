@@ -1,0 +1,91 @@
+name: arm-dispatch-audit
+
+# The point of this workflow: a judge forks the repo, clicks Run workflow, and
+# gets the same numbers on their own free Neoverse-N2 runner in a few minutes.
+# No cloud spend, no hardware, no trust required.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  audit:
+    # ubuntu-24.04-arm is Neoverse-N2 (Azure Cobalt 100). Free on public repos,
+    # 4 vCPU / 15 GB — measured, not assumed (run 30563164792).
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: What the runner claims to be
+        run: |
+          echo "=== uname ==="
+          uname -a
+          echo
+          echo "=== /proc/cpuinfo features ==="
+          grep -m1 '^Features' /proc/cpuinfo
+          echo
+          echo "=== core count / memory ==="
+          nproc
+          free -g | head -2
+          echo
+          echo "=== model ==="
+          lscpu | grep -Ei 'model name|implementer|part|architecture' || true
+
+      - name: Build the probe (portable + SVE variants)
+        run: |
+          cc -O2 -o isa-probe-portable src/isa-probe.c
+          # The SVE build is what actually calls svcntb(). If the toolchain
+          # cannot target SVE, that is itself worth recording rather than hiding.
+          if cc -O2 -march=armv8.2-a+sve -DHAVE_SVE -o isa-probe-sve src/isa-probe.c 2>/dev/null; then
+            echo "SVE build: OK"
+          else
+            echo "SVE build: FAILED (toolchain lacks +sve)"
+          fi
+
+      - name: The finding — advertised vs dispatched
+        run: |
+          set +e
+          echo "### portable build"
+          ./isa-probe-portable
+          echo "portable exit: $?"
+          echo
+          if [ -x ./isa-probe-sve ]; then
+            echo "### SVE build (this one calls svcntb)"
+            ./isa-probe-sve
+            echo "sve exit: $?    # 2 = advertised but KleidiAI refuses"
+          fi
+
+      - name: Confirm the gate against KleidiAI's own source
+        run: |
+          # Do not take our word for the threshold: read it out of the upstream
+          # file. If upstream changes the constant, this step surfaces it.
+          git clone --depth 1 https://github.com/ggml-org/llama.cpp /tmp/llama.cpp 2>/dev/null || \
+            git clone --depth 1 https://github.com/ggerganov/llama.cpp /tmp/llama.cpp
+          echo "=== the runtime gate ==="
+          grep -rn "svcntb" /tmp/llama.cpp --include=*.cpp --include=*.c --include=*.h | head -20 || \
+            echo "(svcntb not found — upstream layout changed, see repo README)"
+          echo
+          echo "=== SVE kernels that exist in the dispatch table ==="
+          grep -rln "sve" /tmp/llama.cpp/ggml/src/ggml-cpu 2>/dev/null | head -10 || true
+
+      - name: PMU counters (the receipt behind the claim)
+        run: |
+          # perf is normally locked down on runners; this is the exact incantation
+          # that makes real counters available (verified, run 30564083075).
+          sudo sysctl -w kernel.perf_event_paranoid=-1 || true
+          sudo apt-get update -qq && sudo apt-get install -y -qq linux-tools-common linux-tools-generic 2>/dev/null || true
+          echo "=== IPC on the probe itself (sanity: counters are live) ==="
+          perf stat -e instructions,cycles ./isa-probe-portable 2>&1 | tail -12 || \
+            echo "perf unavailable on this runner image"
+
+      - name: Upload the audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dispatch-audit
+          path: |
+            isa-probe-portable
+            isa-probe-sve
+          if-no-files-found: ignore
