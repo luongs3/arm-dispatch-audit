@@ -113,7 +113,13 @@ int main(void)
     }
     printf("\n");
 
-    /* The gate. This single comparison is the entire finding. */
+    /* The gate. This single comparison is the entire finding.
+     *
+     * Only the SVE build can answer it: svcntb() is an SVE intrinsic, so a
+     * portable build has no way to read the vector length. Reporting "0 bits"
+     * from that build would be a fabricated measurement, so the portable build
+     * declines to render a verdict instead. */
+    int can_measure = !has_sve || vb > 0;
     int kleidiai_sve = has_sve && vb == KLEIDIAI_REQUIRED_SVCNTB;
 
     feature_t feats[] = {
@@ -121,22 +127,34 @@ int main(void)
         { "i8mm    (int8 mm)", has_i8mm, has_i8mm, "neon_i8mm kernels — the real path" },
         { "bf16",              has_bf16, has_bf16, "bf16 kernels where present" },
         { "SVE / SVE2",        has_sve, kleidiai_sve,
-          has_sve && !kleidiai_sve
-            ? "ADVERTISED BUT UNREACHABLE — kleidiai.cpp:209 needs svcntb()==32"
-            : (has_sve ? "reachable (256-bit vector)" : "absent on this core") },
+          !can_measure
+            ? "UNKNOWN — portable build cannot call svcntb(); rebuild with +sve"
+            : (has_sve && !kleidiai_sve
+                 ? "ADVERTISED BUT UNREACHABLE — kleidiai.cpp:209 needs svcntb()==32"
+                 : (has_sve ? "reachable (256-bit vector)" : "absent on this core")) },
     };
 
     printf("%-20s %-12s %-12s %s\n", "FEATURE", "ADVERTISED", "KLEIDIAI", "NOTE");
     printf("%-20s %-12s %-12s %s\n", "-------", "----------", "--------", "----");
     for (size_t i = 0; i < sizeof(feats) / sizeof(feats[0]); i++) {
+        int is_sve_row = (i == 3);
         printf("%-20s %-12s %-12s %s\n",
                feats[i].name,
                feats[i].advertised ? "yes" : "no",
-               feats[i].usable ? "USES" : "refuses",
+               (is_sve_row && !can_measure) ? "unknown"
+                                            : (feats[i].usable ? "USES" : "refuses"),
                feats[i].note);
     }
 
     printf("\n=== VERDICT ===\n");
+    if (!can_measure) {
+        /* Refuse to state a vector length we did not measure. */
+        printf("This core advertises SVE, but this build cannot read the vector length.\n");
+        printf("svcntb() is an SVE intrinsic and is absent from the portable build.\n");
+        printf("Rebuild to settle it:\n");
+        printf("  cc -O2 -march=armv8.2-a+sve -DHAVE_SVE -o isa-probe-sve src/isa-probe.c\n");
+        return 3;   /* distinct exit code: "advertised, not measurable here" */
+    }
     if (has_sve && !kleidiai_sve) {
         printf("This core advertises SVE, but KleidiAI will NOT dispatch a single SVE kernel.\n");
         printf("Required: svcntb() == %d (256-bit).  Actual: %lu (%lu-bit).\n",
