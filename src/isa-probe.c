@@ -5,8 +5,13 @@
  * "sve sve2 svei8mm svebf16", so every tutorial assumes the SVE GEMM kernels
  * are in play. They are not. KleidiAI's runtime gate requires a 256-bit vector:
  *
- *     // kleidiai.cpp:209
- *     if (svcntb() == 32) { features |= CPU_FEATURE_SVE; }
+ *     // kleidiai.cpp:209 — the gate, but the number is two hops away
+ *     ((ggml_cpu_has_sve() && ggml_cpu_get_sve_cnt() == QK8_0) ? CPU_FEATURE_SVE : ...)
+ *     // ggml-cpu.c:732 :  ggml_arm_arch_features.sve_cnt = svcntb();
+ *     // ggml-common.h:251 : #define QK8_0 32
+ *
+ * Substituting, the gate is svcntb() == 32. Note that grepping svcntb inside
+ * kleidiai.cpp finds nothing — the indirection is why this goes unnoticed.
  *
  * svcntb() returns the SVE vector length in BYTES. N2 and Cobalt are 128-bit,
  * so svcntb() == 16, the flag is never set, and every SVE kernel in the table
@@ -130,7 +135,7 @@ int main(void)
           !can_measure
             ? "UNKNOWN — portable build cannot call svcntb(); rebuild with +sve"
             : (has_sve && !kleidiai_sve
-                 ? "ADVERTISED BUT UNREACHABLE — kleidiai.cpp:209 needs svcntb()==32"
+                 ? "ADVERTISED BUT UNREACHABLE — kleidiai.cpp:209 needs sve_cnt==QK8_0 (32)"
                  : (has_sve ? "reachable (256-bit vector)" : "absent on this core")) },
     };
 

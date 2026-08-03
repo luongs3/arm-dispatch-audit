@@ -11,17 +11,29 @@ An ISA dispatch audit for Arm — reproducible on a free CI runner in about two 
 Neoverse N2 and Azure Cobalt 100 advertise `sve sve2 svei8mm svebf16`. Read `/proc/cpuinfo` on
 one and you will believe the SVE GEMM kernels are doing your matrix multiplies.
 
-They are not. KleidiAI gates every SVE kernel behind a runtime check for a **256-bit** vector:
+They are not. KleidiAI gates every SVE kernel behind a runtime check for a **256-bit** vector.
+The gate is two hops, so quote both — the first line alone does not show the number:
 
 ```cpp
-// llama.cpp — ggml/src/ggml-cpu/kleidiai/kleidiai.cpp
-if (svcntb() == 32) { features |= CPU_FEATURE_SVE; }
+// 1. llama.cpp — ggml/src/ggml-cpu/kleidiai/kleidiai.cpp:209
+((ggml_cpu_has_sve() && ggml_cpu_get_sve_cnt() == QK8_0) ? CPU_FEATURE_SVE : CPU_FEATURE_NONE);
+
+// 2. llama.cpp — ggml/src/ggml-cpu/ggml-cpu.c:732   (what sve_cnt actually is)
+ggml_arm_arch_features.sve_cnt = svcntb();
+
+// 3. ggml-common.h:251
+#define QK8_0 32
 ```
 
-`svcntb()` returns the SVE vector length **in bytes**, so `32` means 256-bit. N2 and Cobalt are
-**128-bit** parts. `svcntb()` returns `16`, `CPU_FEATURE_SVE` is never set, and every `*_sve_*`
-kernel in the dispatch table is **unreachable dead code** on the most widely-available Neoverse
-silicon — including the free GitHub runner every developer can reach.
+Substituting: `CPU_FEATURE_SVE` is set only when **`svcntb() == 32`**. `svcntb()` returns the SVE
+vector length **in bytes**, so `32` means 256-bit. N2 and Cobalt are **128-bit** parts. `svcntb()`
+returns `16`, the flag is never set, and every `*_sve_*` kernel in the dispatch table is
+**unreachable dead code** on the most widely-available Neoverse silicon — including the free
+GitHub runner every developer can reach.
+
+> Note the indirection: grepping `svcntb` inside `kleidiai.cpp` finds **nothing**. The threshold
+> lives behind `ggml_cpu_get_sve_cnt()` and the constant `QK8_0`, which is exactly why this gate
+> goes unnoticed. The CI workflow resolves all three hops from upstream source on every run.
 
 Measured on `ubuntu-24.04-arm`, not asserted:
 

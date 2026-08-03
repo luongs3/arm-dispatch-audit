@@ -59,13 +59,30 @@ jobs:
 
       - name: Confirm the gate against KleidiAI's own source
         run: |
-          # Do not take our word for the threshold: read it out of the upstream
-          # file. If upstream changes the constant, this step surfaces it.
+          # Do not take our word for the threshold: resolve it out of upstream.
+          # The gate is THREE hops -- kleidiai.cpp never mentions svcntb, which is
+          # precisely why it goes unnoticed. If upstream moves any hop, this fails.
           git clone --depth 1 https://github.com/ggml-org/llama.cpp /tmp/llama.cpp 2>/dev/null || \
             git clone --depth 1 https://github.com/ggerganov/llama.cpp /tmp/llama.cpp
-          echo "=== the runtime gate ==="
-          grep -rn "svcntb" /tmp/llama.cpp --include=*.cpp --include=*.c --include=*.h | head -20 || \
-            echo "(svcntb not found — upstream layout changed, see repo README)"
+          K=/tmp/llama.cpp/ggml/src/ggml-cpu/kleidiai/kleidiai.cpp
+          C=/tmp/llama.cpp/ggml/src/ggml-cpu/ggml-cpu.c
+          H=/tmp/llama.cpp/ggml/src/ggml-common.h
+
+          echo "=== hop 1: the gate in kleidiai.cpp ==="
+          grep -n "ggml_cpu_get_sve_cnt" "$K" || { echo "GATE MOVED"; exit 1; }
+          echo
+          echo "=== hop 1b: proof kleidiai.cpp never says svcntb ==="
+          if grep -q "svcntb" "$K"; then echo "upstream changed: svcntb now inline"; else
+            echo "confirmed: 0 occurrences of svcntb in kleidiai.cpp"; fi
+          echo
+          echo "=== hop 2: what sve_cnt actually is ==="
+          grep -n "sve_cnt = svcntb" "$C" || { echo "HOP 2 MOVED"; exit 1; }
+          echo
+          echo "=== hop 3: the constant it is compared against ==="
+          grep -n "define QK8_0" "$H" || { echo "HOP 3 MOVED"; exit 1; }
+          echo
+          echo "=> substituting: CPU_FEATURE_SVE requires svcntb() == 32 (256-bit)"
+
           echo
           echo "=== SVE kernels that exist in the dispatch table ==="
           grep -rln "sve" /tmp/llama.cpp/ggml/src/ggml-cpu 2>/dev/null | head -10 || true
